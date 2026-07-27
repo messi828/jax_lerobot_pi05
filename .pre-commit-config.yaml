@@ -1,4 +1,4 @@
-exclude: third_party/
+exclude: ^(third_party|lerobot)/
 
 repos:
   - repo: https://github.com/astral-sh/uv-pre-commit
