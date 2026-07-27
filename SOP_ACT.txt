@@ -1,0 +1,127 @@
+SO-ARM101 ACT 训练与真机部署 SOP
+========================================================================
+ACT（Action Chunking with Transformers）基线：轻量（~52M 参数）、
+训练快、单卡数小时即可收敛，适合作为 pi0.5 之外的对照基线。
+
+工作空间：/home/jaylen/桌面/jax_lerobot_pi05
+环境：    conda activate jax_pi05（与采集/pi0.5 训练同一环境）
+数据：    与 pi0.5 共用同一份数据集，无需重新采集
+          dataset/jaylen/pick_lift_cube_so101_v2（50 条，30Hz，
+          task="pick_screw_into_box"）
+
+与 pi0.5 的关键差异：
+  - 纯 PyTorch，走 lerobot-train / lerobot-record 命令行
+  - 不需要 compute_norm_stats（归一化用数据集自带 stats.json，
+    已打包进 checkpoint 的 pre/postprocessor）
+  - 不需要策略服务器，推理直接在本机进程内跑
+  - 没有语言理解：single_task 只是数据标注，模型不看 prompt
+
+
+########################################################################
+# 第一部分：训练
+########################################################################
+
+1.1 一键训练
+  conda activate jax_pi05
+  cd /home/jaylen/桌面/jax_lerobot_pi05
+  bash train_act_so101.sh
+  # 默认 batch_size=8、steps=100000，3080 上约数小时
+  # 显存不够改脚本内 --batch_size=4
+
+1.2 训练产物
+  checkpoints/act/act_so101_pick/checkpoints/
+    ├── 002000/            按 save_freq 保存的 checkpoint
+    │   ├── pretrained_model/    ← 部署用这个目录
+    │   │   ├── config.json
+    │   │   ├── model.safetensors
+    │   │   ├── policy_preprocessor*  归一化（已含 stats）
+    │   │   └── policy_postprocessor* 反归一化
+    │   └── training_state/      优化器状态（续训用）
+    └── last/              指向最新 checkpoint 的软链接
+
+1.3 断点续训
+  lerobot-train \
+    --config_path=checkpoints/act/act_so101_pick/checkpoints/last/pretrained_model/train_config.json \
+    --resume=true
+
+1.4 训练建议
+  - 2000 步只能算冒烟，正式部署前建议练满 50k-100k 步
+  - loss 降到个位数并趋平后再上真机
+  - 换任务/数据集：改 train_act_so101.sh 里 REPO_ID、DATASET_ROOT、
+    JOB_NAME 三个变量
+
+
+########################################################################
+# 第二部分：真机部署
+########################################################################
+
+2.1 部署前自检（机械臂上电后）
+  ls -l /dev/so101_follower2 /dev/video-so101-wrist   # 串口+腕相机
+  lsusb | grep 8086                                   # D435i 在线
+  ls checkpoints/act/act_so101_pick/checkpoints/last/pretrained_model/
+  # 主臂不需要上电，部署只用从臂
+
+2.2 运行推理（lerobot-record 用策略控制从臂，同时录评估数据）
+  conda activate jax_pi05
+  cd /home/jaylen/桌面/jax_lerobot_pi05
+
+  lerobot-record \
+    --robot.type=so101_follower \
+    --robot.port=/dev/so101_follower2 \
+    --robot.id=follower2 \
+    --robot.use_degrees=true \
+    --robot.max_relative_target=30 \
+    --robot.cameras="{ front: {type: intelrealsense, serial_number_or_name: '050522073017', width: 640, height: 480, fps: 30}, wrist: {type: opencv, index_or_path: /dev/video-so101-wrist, width: 640, height: 480, fps: 30}}" \
+    --dataset.repo_id=jaylen/eval_act_pick_screw \
+    --dataset.root=/home/jaylen/桌面/jax_lerobot_pi05/dataset/jaylen/eval_act_pick_screw \
+    --dataset.single_task="pick_screw_into_box" \
+    --dataset.fps=30 \
+    --dataset.episode_time_s=30 \
+    --dataset.reset_time_s=10 \
+    --dataset.num_episodes=10 \
+    --dataset.push_to_hub=false \
+    --policy.path=checkpoints/act/act_so101_pick/checkpoints/last/pretrained_model \
+    --policy.device=cuda \
+    --display_data=true
+
+2.3 参数说明（必须与训练数据一致的项）
+  --robot.use_degrees=true      训练数据是度制，必须为 true
+  --robot.id=follower2          对应校准文件 follower2.json
+  相机 key 名 front / wrist     必须与训练数据完全一致（分辨率同）
+  --dataset.fps=30              与训练数据 fps 一致
+  --dataset.single_task         写采集时的 task 文案（仅作标注）
+
+  安全与节奏：
+  --robot.max_relative_target   单步关节限幅（度）。首跑建议 15，
+                                稳定后可调大或去掉
+  --dataset.episode_time_s      单条评估时长（秒）
+  --policy.path                 可指定具体步数，如
+                                checkpoints/act/act_so101_pick/checkpoints/100000/pretrained_model
+
+2.4 运行中操作
+  - 画面窗口（display_data=true）可实时看两路相机
+  - 键盘：右箭头=提前结束本条并进入 reset，
+          左箭头=重录本条，ESC=停止整个流程
+  - Ctrl+C 退出会断开串口并释放扭矩
+  - 评估数据写入 --dataset.root 指定目录，可用于统计成功率
+
+2.5 安全须知
+  - 首跑：桌面清空、夹爪空载、人守在电源/急停旁
+  - max_relative_target 先小后大；异常抖动立刻 Ctrl+C
+  - 物体摆放、光照、相机角度尽量与采集时一致，ACT 对视角变化敏感
+
+2.6 常见问题
+  - 一动不动/乱动：检查 use_degrees 是否 true、相机 key 名是否
+    front/wrist、是否用错 checkpoint
+  - 报 FileExistsError：--dataset.root 目录已存在，换 repo_id/root
+    或加 --resume=true 续录
+  - "no status packet"：从臂供电/USB 松动，参照主 SOP 1.4 排查
+  - 效果差：先确认训练步数是否足够（≥50k），再考虑加采数据
+
+
+########################################################################
+# 附录：与主 SOP 的关系
+########################################################################
+  采集、串口绑定、校准、相机命名等公共流程见 SOP.txt 第一部分。
+  pi0.5 训练/推理见 SOP.txt 第二、三部分。
+  本文件只覆盖 ACT 的训练与部署。

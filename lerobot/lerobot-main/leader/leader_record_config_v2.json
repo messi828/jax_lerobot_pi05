@@ -1,8 +1,8 @@
 {
   "record": {
-    "fps": 10,
+    "fps": 30,
     "control_time_s": 12.0,
-    "reset_time_s": 3.0,
+    "reset_time_s": 5.0,
     "fixed_reset_joint_positions": [-1.58, -104.35, 96.22, 72.66, 13.67, 1.3]
   },
   "follower": {
@@ -34,9 +34,9 @@
   },
   "dataset": {
     "repo_id": "jaylen/pick_lift_cube_so101_v2",
-    "task": "pick_lift_cube",
-    "root": null,
-    "num_episodes_to_record": 20,
+    "task": "pick_screw_into_box",
+    "root": "/home/jaylen/桌面/jax_lerobot_pi05/dataset/jaylen/pick_lift_cube_so101_v2",
+    "num_episodes_to_record": 50,
     "push_to_hub": false
   }
 }

@@ -64,6 +64,7 @@ lerobot： /home/jaylen/桌面/jax_lerobot_pi05/lerobot/lerobot-main
     dataset.repo_id                jaylen/pick_lift_cube_so101_v2
     dataset.task                   任务描述（会作为训练 prompt）
     dataset.num_episodes_to_record 条数（一般 30-50 条起）
+    dataset.root                   工作区 dataset/ 下的数据集路径
     record.fps=10  record.control_time_s=12
     follower/leader 端口与 id、front/wrist 相机已配好
   注意：dataset.task 就是推理时的指令，起名要有语义，
@@ -73,7 +74,8 @@ lerobot： /home/jaylen/桌面/jax_lerobot_pi05/lerobot/lerobot-main
   python leader/record_with_leader.py \
     --config_path leader/leader_record_config_v2.json
   # 每条结束打标：s=成功保存  f=失败保存  r=重录  q=退出
-  数据写入 ~/.cache/huggingface/lerobot/jaylen/pick_lift_cube_so101_v2
+  数据写入 /home/jaylen/桌面/jax_lerobot_pi05/dataset/jaylen/pick_lift_cube_so101_v2
+  （由采集配置 dataset.root 指定；训练配置 dataset_root 同步指向该目录）
 
 
 ########################################################################
@@ -111,11 +113,23 @@ lerobot： /home/jaylen/桌面/jax_lerobot_pi05/lerobot/lerobot-main
     └── assets/   归一化统计（推理自动加载）
 
   若在服务器训练：先同步数据集目录
-  ~/.cache/huggingface/lerobot/jaylen/pick_lift_cube_so101_v2 到服务器同路径。
+  /home/jaylen/桌面/jax_lerobot_pi05/dataset/jaylen/pick_lift_cube_so101_v2
+  到服务器同路径（或改 config.py 中的 dataset_root）。
 
 2.4 换任务/换数据集时
-  改 config.py 中 pi05_so101 的 repo_id（或复制一份新配置），
-  重跑 2.2 + 2.3。
+  改 config.py 中 pi05_so101 的 repo_id 和 dataset_root
+  （或复制一份新配置），重跑 2.2 + 2.3。
+
+2.5 ACT 基线训练（PyTorch，可选，与 pi0.5 共用同一份数据）
+  conda activate jax_pi05
+  cd /home/jaylen/桌面/jax_lerobot_pi05
+  bash train_act_so101.sh
+  # 内部调用 lerobot-train --policy.type=act，
+  #   数据读 dataset/jaylen/pick_lift_cube_so101_v2（--dataset.root）
+  #   checkpoint 输出 checkpoints/act/act_so101_pick/checkpoints/<step>/
+  # 无需 compute_norm_stats（ACT 用数据集自带 stats 归一化）
+  # 显存不够改脚本里 --batch_size=4；断点续训见脚本尾部注释
+  # 训练细节与真机部署见独立文档：SOP_ACT.txt
 
 
 ########################################################################
@@ -187,7 +201,8 @@ A. 文件一览
   【训练】jax_lerobot_pi05/
     src/openpi/policies/so101_policy.py       SO101 transforms
     src/openpi/training/config.py             pi05_so101(_lora) 配置
-    finetune_so101.sh                         一键训练
+    finetune_so101.sh                         一键训练（pi0.5）
+    train_act_so101.sh                        一键训练（ACT 基线）
   【推理】
     scripts/serve_policy.py                   策略服务器（openpi 根目录）
     lerobot-main/scripts/so101_pi05_client.py 真机客户端

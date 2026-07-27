@@ -66,6 +66,9 @@ class AssetsConfig:
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
     repo_id: str | None = None
+    # Local directory of the LeRobot dataset. If None, the default HF cache (~/.cache/huggingface/lerobot/<repo_id>)
+    # will be used.
+    dataset_root: str | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
@@ -1349,6 +1352,8 @@ _CONFIGS = [
         data=LeRobotSO101DataConfig(
             repo_id="jaylen/pick_lift_cube_so101_v2",
             base_config=DataConfig(
+                # Load the dataset from the workspace `dataset/` folder (written there by record_with_leader.py).
+                dataset_root="/home/jaylen/桌面/jax_lerobot_pi05/dataset/jaylen/pick_lift_cube_so101_v2",
                 # Use the task stored in the LeRobot dataset as the prompt.
                 prompt_from_task=True,
             ),
@@ -1381,6 +1386,7 @@ _CONFIGS = [
         data=LeRobotSO101DataConfig(
             repo_id="jaylen/pick_lift_cube_so101_v2",
             base_config=DataConfig(
+                dataset_root="/home/jaylen/桌面/jax_lerobot_pi05/dataset/jaylen/pick_lift_cube_so101_v2",
                 prompt_from_task=True,
             ),
         ),
