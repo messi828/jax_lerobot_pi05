@@ -15,3 +15,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v3
       - uses: pre-commit/action@v3.0.1
+        if: github.event_name == 'push'
+        with:
+          extra_args: --from-ref ${{ github.event.before }} --to-ref ${{ github.sha }}
+      - uses: pre-commit/action@v3.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          extra_args: --from-ref ${{ github.event.pull_request.base.sha }} --to-ref ${{ github.sha }}
