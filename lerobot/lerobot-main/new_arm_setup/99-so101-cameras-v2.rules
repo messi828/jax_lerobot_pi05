@@ -1,0 +1,3 @@
+# SO101 cameras v2 (2026-07-27)
+# 腕部 wrist: OpenCV USB 1bcf:2281 serial=JYU2C-2083-2605118 -> /dev/video-so101-wrist
+SUBSYSTEM=="video4linux", ATTR{index}=="0", ATTRS{idVendor}=="1bcf", ATTRS{idProduct}=="2281", ATTRS{serial}=="JYU2C-2083-2605118", SYMLINK+="video-so101-wrist", MODE="0666"

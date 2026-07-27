@@ -1,0 +1,203 @@
+SO-ARM101 + JAX pi0.5 完整流程 SOP
+========================================================================
+数据采集 → 微调训练 → 真机推理
+
+工作空间：/home/jaylen/桌面/jax_lerobot_pi05        （openpi JAX 工程）
+lerobot： /home/jaylen/桌面/jax_lerobot_pi05/lerobot/lerobot-main
+
+统一环境：conda activate jax_pi05
+  （Python 3.11，含 JAX+CUDA / PyTorch / 本地 lerobot / openpi /
+    feetech 电机驱动 / pyrealsense2 / openpi-client，采集训练推理通用；
+    lerobot_rl 仍可用于采集，但推荐统一用 jax_pi05）
+
+硬件长期命名（已绑定 udev，插拔不乱）
+  从臂：/dev/so101_follower2   id=follower2   serial=5B3D042113
+  主臂：/dev/so101_leader2     id=leader2     serial=5B3D045879
+  腕部相机 wrist：/dev/video-so101-wrist      (1bcf:2281)
+  全局相机 front：RealSense D435i             serial=050522073017
+
+数据/动作格式（三个阶段必须一致，勿改）
+  observation.state / action: (6,) 绝对关节角，度制，gripper 0-100
+  电机顺序：shoulder_pan → shoulder_lift → elbow_flex →
+            wrist_flex → wrist_roll → gripper
+  图像：observation.images.front / observation.images.wrist，fps=10
+
+
+########################################################################
+# 第一部分：数据采集
+########################################################################
+
+1.0 进入环境
+  conda activate jax_pi05
+  cd /home/jaylen/桌面/jax_lerobot_pi05/lerobot/lerobot-main
+  python -c "import lerobot; print(lerobot.__file__)"
+  # 应包含 .../jax_lerobot_pi05/lerobot/lerobot-main/src/lerobot/...
+
+1.1 串口绑定（每套新臂首次必做；本套已完成）
+  规则文件：new_arm_setup/99-so101-serial-v2.rules
+  sudo cp new_arm_setup/99-so101-serial-v2.rules /etc/udev/rules.d/
+  sudo udevadm control --reload-rules && sudo udevadm trigger
+  ls -l /dev/so101_follower2 /dev/so101_leader2
+  # 换新臂时：bash new_arm_setup/01_detect_ports.sh 重新识别序列号
+
+1.2 校准（每套新臂一次；本套已完成）
+  bash new_arm_setup/02_calibrate_follower.sh   # 只接从臂
+  bash new_arm_setup/03_calibrate_leader.sh     # 只接主臂
+  # 操作：摆中位确认 → 各关节缓慢转到两端极限 → 回车
+  校准文件：
+  ~/.cache/huggingface/lerobot/calibration/robots/so_follower/follower2.json
+  ~/.cache/huggingface/lerobot/calibration/teleoperators/so_leader/leader2.json
+
+1.3 相机确认（本套已完成命名）
+  ls -l /dev/video-so101-wrist          # 腕部 udev 链接
+  lsusb | grep 8086                     # D435i 已识别
+  # 换相机/分不清哪路时：
+  python new_arm_setup/05_identify_and_name_cameras.py
+  # （联合预览两路画面，选定角色后自动写 udev 规则与采集配置）
+
+1.4 遥操作自检（每次采集前建议）
+  bash new_arm_setup/04_teleop_test.sh
+  # 从臂应平滑跟随主臂，无卡顿/反向/抖动；Ctrl+C 退出
+
+1.5 采集配置
+  文件：leader/leader_record_config_v2.json
+    dataset.repo_id                jaylen/pick_lift_cube_so101_v2
+    dataset.task                   任务描述（会作为训练 prompt）
+    dataset.num_episodes_to_record 条数（一般 30-50 条起）
+    record.fps=10  record.control_time_s=12
+    follower/leader 端口与 id、front/wrist 相机已配好
+  注意：dataset.task 就是推理时的指令，起名要有语义，
+        换任务时改 repo_id 和 task。
+
+1.6 正式采集
+  python leader/record_with_leader.py \
+    --config_path leader/leader_record_config_v2.json
+  # 每条结束打标：s=成功保存  f=失败保存  r=重录  q=退出
+  数据写入 ~/.cache/huggingface/lerobot/jaylen/pick_lift_cube_so101_v2
+
+
+########################################################################
+# 第二部分：微调训练（JAX pi0.5）
+########################################################################
+
+训练配置（已写好，位于 src/openpi/training/config.py）：
+  pi05_so101       全量微调（多卡服务器用）
+  pi05_so101_lora  LoRA 低显存微调（本机 RTX 3080 20G 建议用这个）
+数据管线适配：src/openpi/policies/so101_policy.py
+  （6D 状态/动作 ↔ pi0.5 32D；front→base_0_rgb，wrist→left_wrist_0_rgb）
+
+2.1 一键脚本（本机或训练服务器）
+  conda activate jax_pi05
+  cd /home/jaylen/桌面/jax_lerobot_pi05
+  bash finetune_so101.sh
+  # 等价于以下两步
+
+2.2 计算归一化统计（数据采集完成后必做一次）
+  python scripts/compute_norm_stats.py --config-name pi05_so101
+  # 写入 ./assets/pi05_so101/jaylen/pick_lift_cube_so101_v2/
+
+2.3 训练
+  # 本机单卡（建议 LoRA；先在 config 里按需调小 batch_size）
+  XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
+  python scripts/train.py pi05_so101_lora --exp-name so101_pick --overwrite
+
+  # 多卡服务器全量微调
+  CUDA_VISIBLE_DEVICES=0,1,2,3 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
+  python scripts/train.py pi05_so101 --exp-name so101_pick --overwrite
+
+  首次会自动下载 pi0.5 base 权重（gs://openpi-assets，需外网）。
+  checkpoint 输出：checkpoints/<config名>/so101_pick/<step>/
+    ├── params/   JAX 权重
+    └── assets/   归一化统计（推理自动加载）
+
+  若在服务器训练：先同步数据集目录
+  ~/.cache/huggingface/lerobot/jaylen/pick_lift_cube_so101_v2 到服务器同路径。
+
+2.4 换任务/换数据集时
+  改 config.py 中 pi05_so101 的 repo_id（或复制一份新配置），
+  重跑 2.2 + 2.3。
+
+
+########################################################################
+# 第三部分：真机推理
+########################################################################
+
+架构：openpi WebSocket 策略服务器 + lerobot 真机客户端
+（服务器与客户端可同机，也可服务器在训练机、客户端在本机）
+
+3.1 启动策略服务器
+  conda activate jax_pi05
+  cd /home/jaylen/桌面/jax_lerobot_pi05
+  python scripts/serve_policy.py policy:checkpoint \
+    --policy.config=pi05_so101_lora \
+    --policy.dir=checkpoints/pi05_so101_lora/so101_pick/<step>
+  # 默认监听 8000 端口；config 名与训练所用一致
+
+3.2 启动真机客户端（另开终端）
+  conda activate jax_pi05
+  cd /home/jaylen/桌面/jax_lerobot_pi05/lerobot/lerobot-main
+
+  # 首次真机试跑（低速小步安全参数）：
+  python scripts/so101_pi05_client.py \
+    --host localhost --port 8000 \
+    --task "pick_lift_cube" \
+    --max-relative-target 15 --n-execute 5 --max-steps 50
+
+  # 正常运行：
+  python scripts/so101_pi05_client.py --task "pick_lift_cube"
+
+  参数说明：
+    --task                 必须与训练数据的 task 语义一致
+    --n-execute N          每个 action chunk 执行前 N 步后重推理（默认10）
+    --max-relative-target  单步关节限幅（度），安全阀（默认30）
+    --reset-joints 6个角度 启动时缓慢回初始位
+    --host                 服务器不在本机时填训练机 IP
+  相机/串口默认与采集一致，无需额外指定。
+
+3.3 安全须知
+  - 首跑桌面清空、夹爪空载，人在急停位置
+  - Ctrl+C 退出会断开并释放扭矩
+  - 推理表现差先检查：task 文案、相机画面角度是否与采集一致、
+    state 单位（必须 use_degrees）
+
+3.4 推理前自检清单
+  ls -l /dev/so101_follower2 /dev/video-so101-wrist
+  lsusb | grep 8086                          # D435i
+  python -c "import jax; print(jax.devices())"          # [CudaDevice(id=0)]
+  python -c "from openpi.training.config import get_config; \
+             print(get_config('pi05_so101').name)"
+  ls checkpoints/*/so101_pick/                # checkpoint 存在
+
+
+########################################################################
+# 附录
+########################################################################
+
+A. 文件一览
+  【采集】lerobot/lerobot-main/
+    new_arm_setup/01_detect_ports.sh          串口识别+udev 生成
+    new_arm_setup/02/03_calibrate_*.sh        主从臂校准
+    new_arm_setup/04_teleop_test.sh           遥操作自检
+    new_arm_setup/05_identify_and_name_cameras.py  相机联合检测命名
+    new_arm_setup/99-so101-serial-v2.rules    臂串口 udev
+    new_arm_setup/99-so101-cameras-v2.rules   相机 udev
+    new_arm_setup/camera_ids.json             相机身份记录
+    leader/leader_record_config_v2.json       采集配置
+    leader/record_with_leader.py              采集脚本
+  【训练】jax_lerobot_pi05/
+    src/openpi/policies/so101_policy.py       SO101 transforms
+    src/openpi/training/config.py             pi05_so101(_lora) 配置
+    finetune_so101.sh                         一键训练
+  【推理】
+    scripts/serve_policy.py                   策略服务器（openpi 根目录）
+    lerobot-main/scripts/so101_pi05_client.py 真机客户端
+
+B. 环境说明
+  jax_pi05    统一环境（采集+训练+推理），Python 3.11
+  lerobot_rl  旧采集环境（仍可用，Python 3.10）
+  已知无害告警：torch 导入时的 pynvml FutureWarning 可忽略
+
+C. 流程总览
+  绑串口 → 校准 → 相机命名 → 遥操作自检 → 采集数据
+  → compute_norm_stats → train (pi05_so101[_lora])
+  → serve_policy 起服务器 → so101_pi05_client 真机推理
