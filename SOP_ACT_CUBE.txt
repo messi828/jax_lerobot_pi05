@@ -1,0 +1,221 @@
+SO-ARM101 ACT 新任务（CUBE）完整 SOP：校准 → 采集 → 训练 → 部署
+========================================================================
+适用：换新任务（抓取方块 cube），用 ACT 基线跑通全流程。
+后续同一份数据可直接用于 pi0.5 微调（见文末第五部分，无需重新采集）。
+
+工作空间：/home/jaylen/桌面/jax_lerobot_pi05
+环境：    conda activate jax_pi05（采集/训练/推理同一环境）
+硬件（udev 已长期绑定，插拔不乱）：
+  从臂：/dev/so101_follower2   id=follower2
+  主臂：/dev/so101_leader2     id=leader2
+  腕部相机 wrist：/dev/video-so101-wrist
+  全局相机 front：RealSense D435i  serial=050522073017
+
+本任务命名约定（全文统一，改任务时只改这三处）：
+  REPO_ID      = jaylen/pick_cube_so101_v1
+  DATASET_ROOT = dataset/jaylen/pick_cube_so101_v1
+  TASK 文案    = "pick up the cube and place it in the box"
+  ★ TASK 文案将来就是 pi0.5 推理时的语言指令（prompt），
+    必须写成有语义的描述（建议英文）。ACT 不看它，但 pi0.5 看，
+    采集后想改很麻烦，采集前定好。
+
+
+########################################################################
+# 第一部分：机械臂校准
+########################################################################
+
+1.0 进入环境与目录
+  conda activate jax_pi05
+  cd /home/jaylen/桌面/jax_lerobot_pi05/lerobot/lerobot-main
+  python -c "import lerobot; print(lerobot.__file__)"
+  # 应包含 .../jax_lerobot_pi05/lerobot/lerobot-main/src/lerobot/...
+
+1.1 串口确认（udev 规则已装，通常直接通过）
+  ls -l /dev/so101_follower2 /dev/so101_leader2
+  # 两个链接都在即可。若缺失（换了新臂/重装系统）：
+  #   bash new_arm_setup/01_detect_ports.sh   重新识别序列号并生成规则
+  #   sudo cp new_arm_setup/99-so101-serial-v2.rules /etc/udev/rules.d/
+  #   sudo udevadm control --reload-rules && sudo udevadm trigger
+
+1.2 校准从臂（只接从臂，主臂断电）
+  bash new_arm_setup/02_calibrate_follower.sh
+  # 操作：摆到中位回车确认 → 每个关节缓慢转到两端机械极限 → 回车
+  # 写入 ~/.cache/huggingface/lerobot/calibration/robots/so_follower/follower2.json
+
+1.3 校准主臂（只接主臂）
+  bash new_arm_setup/03_calibrate_leader.sh
+  # 写入 ~/.cache/huggingface/lerobot/calibration/teleoperators/so_leader/leader2.json
+  # 注：若臂没拆过电机、校准文件还在，1.2/1.3 可跳过
+
+1.4 相机确认
+  ls -l /dev/video-so101-wrist        # 腕部相机 udev 链接存在
+  lsusb | grep 8086                   # D435i 已识别
+  # 分不清哪路/换了相机时：
+  #   python new_arm_setup/05_identify_and_name_cameras.py
+
+1.5 遥操作自检（采集前必做）
+  bash new_arm_setup/04_teleop_test.sh
+  # 从臂应平滑跟随主臂，无卡顿/反向/抖动；Ctrl+C 退出
+  # 有问题先排查供电和 USB，再考虑重新校准
+
+
+########################################################################
+# 第二部分：数据采集
+########################################################################
+
+2.1 新建本任务的采集配置（不要直接改旧配置，复制一份）
+  cd /home/jaylen/桌面/jax_lerobot_pi05/lerobot/lerobot-main
+  cp leader/leader_record_config_v2.json leader/leader_record_config_cube.json
+
+  编辑 leader/leader_record_config_cube.json，只改 dataset 段：
+    "dataset": {
+      "repo_id": "jaylen/pick_cube_so101_v1",
+      "task": "pick up the cube and place it in the box",
+      "root": "/home/jaylen/桌面/jax_lerobot_pi05/dataset/jaylen/pick_cube_so101_v1",
+      "num_episodes_to_record": 50,
+      "push_to_hub": false
+    }
+  其余字段保持不变（fps=30、control_time_s=12、front/wrist 相机、
+  use_degrees=true）。若单条演示 12 秒不够完成 cube 任务，
+  调大 record.control_time_s。
+
+2.2 场景布置
+  - 固定相机位姿、光照、桌面背景，与将来部署时保持一致
+    （ACT 对视角/光照变化敏感）
+  - cube 初始位置在各条之间做小范围随机（覆盖工作区），
+    不要 50 条全放同一个点
+
+2.3 正式采集
+  python leader/record_with_leader.py \
+    --config_path leader/leader_record_config_cube.json
+  # 每条结束打标：s=成功保存  f=失败保存  r=重录  q=退出
+  # 建议 50 条起步；只保留成功的干净演示
+  数据写入 dataset/jaylen/pick_cube_so101_v1
+
+2.4 采集后检查
+  cat ../../dataset/jaylen/pick_cube_so101_v1/meta/info.json
+  # 确认 total_episodes、fps=30、
+  # features 里有 observation.images.front / observation.images.wrist
+
+
+########################################################################
+# 第三部分：ACT 训练
+########################################################################
+
+3.1 训练命令（在工作区根目录）
+  conda activate jax_pi05
+  cd /home/jaylen/桌面/jax_lerobot_pi05
+
+  lerobot-train \
+    --dataset.repo_id=jaylen/pick_cube_so101_v1 \
+    --dataset.root=/home/jaylen/桌面/jax_lerobot_pi05/dataset/jaylen/pick_cube_so101_v1 \
+    --policy.type=act \
+    --policy.device=cuda \
+    --policy.push_to_hub=false \
+    --output_dir=checkpoints/act/act_so101_cube \
+    --job_name=act_so101_cube \
+    --batch_size=8 \
+    --steps=100000 \
+    --save_freq=2000 \
+    --log_freq=100 \
+    --wandb.enable=false
+  # 显存不够改 --batch_size=4
+  # 也可复制 train_act_so101.sh 为 train_act_cube.sh，
+  # 改 REPO_ID / DATASET_ROOT / JOB_NAME 三个变量后 bash 运行
+
+3.2 训练产物
+  checkpoints/act/act_so101_cube/checkpoints/
+    ├── <step>/pretrained_model/   ← 部署用这个目录
+    └── last/                      指向最新 checkpoint 的软链接
+
+3.3 断点续训
+  lerobot-train \
+    --config_path=checkpoints/act/act_so101_cube/checkpoints/last/pretrained_model/train_config.json \
+    --resume=true
+
+3.4 训练标准
+  - 2000 步只算冒烟测试；正式部署前练满 50k-100k 步
+  - loss 降到个位数并趋平后再上真机
+
+
+########################################################################
+# 第四部分：真机部署
+########################################################################
+
+4.1 部署前自检（机械臂上电后；主臂不用接，部署只用从臂）
+  ls -l /dev/so101_follower2 /dev/video-so101-wrist
+  lsusb | grep 8086
+  ls checkpoints/act/act_so101_cube/checkpoints/last/pretrained_model/
+
+4.2 运行推理（lerobot-record 用策略控制从臂，同时录评估数据）
+  conda activate jax_pi05
+  cd /home/jaylen/桌面/jax_lerobot_pi05
+
+  lerobot-record \
+    --robot.type=so101_follower \
+    --robot.port=/dev/so101_follower2 \
+    --robot.id=follower2 \
+    --robot.use_degrees=true \
+    --robot.max_relative_target=15 \
+    --robot.cameras="{ front: {type: intelrealsense, serial_number_or_name: '050522073017', width: 640, height: 480, fps: 30}, wrist: {type: opencv, index_or_path: /dev/video-so101-wrist, width: 640, height: 480, fps: 30}}" \
+    --dataset.repo_id=jaylen/eval_act_cube \
+    --dataset.root=/home/jaylen/桌面/jax_lerobot_pi05/dataset/jaylen/eval_act_cube \
+    --dataset.single_task="pick up the cube and place it in the box" \
+    --dataset.fps=30 \
+    --dataset.episode_time_s=30 \
+    --dataset.reset_time_s=10 \
+    --dataset.num_episodes=10 \
+    --dataset.push_to_hub=false \
+    --policy.path=checkpoints/act/act_so101_cube/checkpoints/last/pretrained_model \
+    --policy.device=cuda \
+    --display_data=true
+  # 首跑 max_relative_target=15（限幅小、安全），稳定后可调到 30 或去掉
+  # --policy.path 可指定具体步数，如 .../checkpoints/100000/pretrained_model
+
+4.3 必须与训练数据一致的项
+  --robot.use_degrees=true      训练数据是度制
+  --robot.id=follower2          对应校准文件 follower2.json
+  相机 key 名 front / wrist     与训练数据完全一致（640x480@30）
+  --dataset.fps=30              与训练数据 fps 一致
+
+4.4 运行中操作
+  - display_data=true 可实时看两路相机画面
+  - 键盘：右箭头=提前结束本条并 reset，左箭头=重录本条，ESC=停止
+  - Ctrl+C 退出会断开串口并释放扭矩
+  - 评估数据写入 dataset/jaylen/eval_act_cube，可用于统计成功率
+
+4.5 安全须知
+  - 首跑：桌面清空（只留 cube 和盒子）、夹爪空载、人守在急停旁
+  - 异常抖动立刻 Ctrl+C
+  - cube 摆放、光照、相机角度尽量与采集时一致
+
+4.6 常见问题
+  - 一动不动/乱动：查 use_degrees、相机 key 名、是否用错 checkpoint
+  - FileExistsError：--dataset.root 目录已存在，换名或加 --resume=true
+  - "no status packet"：从臂供电/USB 松动，参照 SOP.txt 1.4 排查
+  - 效果差：先确认训练步数 ≥50k，再考虑加采数据
+
+
+########################################################################
+# 第五部分：衔接 pi0.5（同一份数据，无需重新采集）
+########################################################################
+
+  1) 改 src/openpi/training/config.py 中 pi05_so101 / pi05_so101_lora 的
+     repo_id → jaylen/pick_cube_so101_v1
+     dataset_root → 本任务 DATASET_ROOT
+  2) 计算归一化统计（pi0.5 必做，ACT 不需要）：
+     python scripts/compute_norm_stats.py --config-name pi05_so101
+  3) 训练（本机 3080 用 LoRA）：
+     XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
+     python scripts/train.py pi05_so101_lora --exp-name cube_pick --overwrite
+     # 首次会从 gs://openpi-assets 下载 base 权重，需外网
+  4) 推理时 --task 就用采集时的 TASK 文案。
+  其余细节见 SOP.txt 第二、三部分。
+
+
+########################################################################
+# 附录：与其他文档的关系
+########################################################################
+  SOP.txt       公共流程（串口绑定、校准细节、pi0.5 训练/推理）
+  SOP_ACT.txt   上一个任务（pick_screw）的 ACT 流程
+  本文件        cube 新任务从校准到部署的完整流程
