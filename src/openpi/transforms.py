@@ -193,17 +193,20 @@ class Unnormalize(DataTransformFn):
         assert stats.q99 is not None
         q01, q99 = stats.q01, stats.q99
         range_val = q99 - q01
+        # Stats are (action_dim,); x may be (action_horizon, model_action_dim) with padding.
+        # Broadcast (dim,) against (..., dim) — do NOT use range_val[..., None] ((dim,1)
+        # fails to broadcast with (horizon, dim)).
         if (dim := q01.shape[-1]) < x.shape[-1]:
             unnormalized_part = np.where(
-                range_val[..., None] > 1e-6,
+                range_val > 1e-6,
                 (x[..., :dim] + 1.0) / 2.0 * (range_val + 1e-6) + q01,
-                x[..., :dim] + q01
+                x[..., :dim] + q01,
             )
             return np.concatenate([unnormalized_part, x[..., dim:]], axis=-1)
         unnormalized = np.where(
             range_val > 1e-6,
             (x + 1.0) / 2.0 * (range_val + 1e-6) + q01,
-            x + q01
+            x + q01,
         )
         return unnormalized
 

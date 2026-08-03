@@ -147,7 +147,13 @@ def create_torch_dataset(
     )
 
     if data_config.prompt_from_task:
-        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+        # LeRobot v2: dict[int, str]. LeRobot v3: DataFrame index=task name, col task_index.
+        tasks = dataset_meta.tasks
+        if hasattr(tasks, "iterrows"):
+            task_mapping = {int(row["task_index"]): str(name) for name, row in tasks.iterrows()}
+        else:
+            task_mapping = {int(k): str(v) for k, v in dict(tasks).items()}
+        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(task_mapping)])
 
     return dataset
 

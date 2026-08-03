@@ -1340,42 +1340,51 @@ _CONFIGS = [
     ),
     #
     # SO101 (SO-ARM101) configs.
+    # Dataset: jaylen/pick_cube_so101_v1 (100 eps, teleop demos). Path is repo-relative
+    # so the same config works on a rented server after syncing the repo + dataset/.
     #
     TrainConfig(
         name="pi05_so101",
-        # Pi 0.5 model; SO101 6D state/actions are padded to 32D by model transforms.
+        # Full-parameter Pi 0.5 finetune for single/multi GPU with >=32GB VRAM.
+        # SO101 6D state/actions are padded to 32D by model transforms.
         model=pi0_config.Pi0Config(
             pi05=True,
             action_dim=32,
             action_horizon=10,
         ),
         data=LeRobotSO101DataConfig(
-            repo_id="jaylen/pick_lift_cube_so101_v2",
+            repo_id="jaylen/pick_cube_so101_v1",
             base_config=DataConfig(
-                # Load the dataset from the workspace `dataset/` folder (written there by record_with_leader.py).
-                dataset_root="/home/jaylen/桌面/jax_lerobot_pi05/dataset/jaylen/pick_lift_cube_so101_v2",
-                # Use the task stored in the LeRobot dataset as the prompt.
+                dataset_root=str(
+                    pathlib.Path(__file__).resolve().parents[3] / "dataset/jaylen/pick_cube_so101_v1"
+                ),
                 prompt_from_task=True,
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        batch_size=32,
+        # Full finetune: needs ~80GB (48GB OOMs even at batch 4). On 80GB use 16+EMA;
+        # OOM → ema_decay=None or batch_size=8.
+        batch_size=16,
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=1000,
+            warmup_steps=500,
             peak_lr=5e-5,
-            decay_steps=20_000,
+            decay_steps=10_000,
             decay_lr=5e-6,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
-        num_train_steps=20_000,
+        # 100 eps single-task: 10k steps is enough; longer mainly burns rent time.
+        num_train_steps=10_000,
         log_interval=100,
-        save_interval=1000,
+        # Sparse checkpoints → less disk I/O and cheaper storage on rented boxes.
+        save_interval=2500,
         keep_period=5000,
+        wandb_enabled=False,
+        fsdp_devices=1,
     ),
     TrainConfig(
         name="pi05_so101_lora",
-        # LoRA variant for low-memory fine-tuning.
+        # LoRA variant for low-memory fine-tuning (local 20GB cards). Prefer pi05_so101 on >=32GB.
         model=pi0_config.Pi0Config(
             pi05=True,
             action_dim=32,
@@ -1384,18 +1393,21 @@ _CONFIGS = [
             action_expert_variant="gemma_300m_lora",
         ),
         data=LeRobotSO101DataConfig(
-            repo_id="jaylen/pick_lift_cube_so101_v2",
+            repo_id="jaylen/pick_cube_so101_v1",
             base_config=DataConfig(
-                dataset_root="/home/jaylen/桌面/jax_lerobot_pi05/dataset/jaylen/pick_lift_cube_so101_v2",
+                dataset_root=str(
+                    pathlib.Path(__file__).resolve().parents[3] / "dataset/jaylen/pick_cube_so101_v1"
+                ),
                 prompt_from_task=True,
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        batch_size=32,
+        # LoRA fits comfortably on 48GB; larger batch than full finetune.
+        batch_size=16,
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=1000,
+            warmup_steps=500,
             peak_lr=5e-5,
-            decay_steps=20_000,
+            decay_steps=10_000,
             decay_lr=5e-6,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
@@ -1405,10 +1417,85 @@ _CONFIGS = [
             action_expert_variant="gemma_300m_lora",
         ).get_freeze_filter(),
         ema_decay=None,
-        num_train_steps=20_000,
+        num_train_steps=10_000,
         log_interval=100,
-        save_interval=1000,
+        save_interval=2500,
         keep_period=5000,
+        wandb_enabled=False,
+    ),
+    # SO101 realshit insertion task. Keep this separate from the cube configs so
+    # normalization statistics and checkpoints cannot be mixed accidentally.
+    TrainConfig(
+        name="pi05_so101_realshit",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=10,
+        ),
+        data=LeRobotSO101DataConfig(
+            repo_id="jaylen/realshit_so101_v1",
+            base_config=DataConfig(
+                dataset_root=str(
+                    pathlib.Path(__file__).resolve().parents[3] / "dataset/jaylen/realshit_so101_v1"
+                ),
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=5e-5,
+            decay_steps=10_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=10_000,
+        log_interval=100,
+        save_interval=2500,
+        keep_period=5000,
+        wandb_enabled=False,
+        fsdp_devices=1,
+    ),
+    TrainConfig(
+        name="pi05_so101_realshit_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=10,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotSO101DataConfig(
+            repo_id="jaylen/realshit_so101_v1",
+            base_config=DataConfig(
+                dataset_root=str(
+                    pathlib.Path(__file__).resolve().parents[3] / "dataset/jaylen/realshit_so101_v1"
+                ),
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=5e-5,
+            decay_steps=10_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_train_steps=10_000,
+        log_interval=100,
+        save_interval=2500,
+        keep_period=5000,
+        wandb_enabled=False,
     ),
     #
     # RoboArena configs.
