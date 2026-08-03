@@ -35,6 +35,7 @@ echo "[2/6] Install system dependencies"
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
   build-essential pkg-config ffmpeg curl tmux \
+  python3 python3-pip python3-venv python-is-python3 \
   libavformat-dev libavcodec-dev libavdevice-dev libavutil-dev \
   libavfilter-dev libswscale-dev libswresample-dev >/dev/null
 
